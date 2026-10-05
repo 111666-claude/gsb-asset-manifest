@@ -47,3 +47,83 @@ class VerifierTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+INHERIT_SAMPLE = """@base
+font.ttf 1024 aaa
+shared.cfg 10 old
+@ui : base
+icon.png 16 bbb
+shared.cfg 20 new
+"""
+
+CYCLE_SAMPLE = """@a : b
+@b : a
+"""
+
+
+class InheritanceTest(unittest.TestCase):
+    def test_child_sees_parent_entries(self):
+        groups, _ = parse(INHERIT_SAMPLE)
+        report = Verifier(groups).compare("ui", {"icon.png": 16, "font.ttf": 1024})
+        self.assertEqual(report["missing"], ["shared.cfg"])
+
+    def test_child_overrides_same_name(self):
+        groups, _ = parse(INHERIT_SAMPLE)
+        entries = Verifier(groups).effective("ui")
+        self.assertEqual(entries["shared.cfg"]["size"], 20)
+        self.assertEqual(entries["shared.cfg"]["hash"], "new")
+        self.assertEqual(len(entries), 3)
+
+    def test_extra_files_reported(self):
+        groups, _ = parse(SAMPLE)
+        report = Verifier(groups).compare(
+            "core", {"font.ttf": 1024, "sfx.wav": 2048, "leftover.tmp": 8}
+        )
+        self.assertEqual(report["extra"], ["leftover.tmp"])
+
+    def test_size_mismatch_reported(self):
+        groups, _ = parse(SAMPLE)
+        report = Verifier(groups).compare("core", {"font.ttf": 4096, "sfx.wav": 2048})
+        self.assertEqual(report["size_mismatch"], ["font.ttf"])
+
+    def test_all_three_sorted(self):
+        groups, _ = parse(INHERIT_SAMPLE)
+        report = Verifier(groups).compare(
+            "ui", {"icon.png": 99, "shared.cfg": 20, "zzz.tmp": 1}
+        )
+        self.assertEqual(report["missing"], ["font.ttf"])
+        self.assertEqual(report["extra"], ["zzz.tmp"])
+        self.assertEqual(report["size_mismatch"], ["icon.png"])
+
+
+class CycleTest(unittest.TestCase):
+    def test_cycle_is_one_error(self):
+        groups, _ = parse(CYCLE_SAMPLE)
+        verifier = Verifier(groups)
+        self.assertEqual(len(verifier.errors()), 1)
+        self.assertEqual(verifier.effective("a"), {})
+
+    def test_cycle_error_independent_of_order(self):
+        groups1, _ = parse(CYCLE_SAMPLE)
+        groups2, _ = parse("@b : a\n@a : b\n")
+        self.assertEqual(Verifier(groups1).errors(), Verifier(groups2).errors())
+
+    def test_missing_parent_is_error(self):
+        groups, _ = parse("@a : ghost\nx 1 h\n")
+        self.assertEqual(len(Verifier(groups).errors()), 1)
+
+    def test_repeated_verification_stable(self):
+        groups, _ = parse(INHERIT_SAMPLE)
+        verifier = Verifier(groups)
+        first = verifier.compare("ui", {"icon.png": 16, "font.ttf": 1024, "shared.cfg": 20})
+        second = verifier.compare("ui", {"icon.png": 16, "font.ttf": 1024, "shared.cfg": 20})
+        self.assertEqual(first, second)
+
+
+class ParseErrorTest(unittest.TestCase):
+    def test_bad_line_bad_size_dup(self):
+        text = "@core\nfont.ttf 1024 aaa\nbad.wav 2048\nx.bin abc h\nfont.ttf 1 h\n"
+        _, errors = parse(text)
+        self.assertEqual(len(errors), 3)
+        groups, _ = parse(text)
+        self.assertEqual(groups["core"]["entries"][0]["hash"], "aaa")
